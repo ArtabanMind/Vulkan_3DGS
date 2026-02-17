@@ -16,6 +16,8 @@ echo Compiling shaders...
 
 glslc simple.comp -o simple.spv
 glslc gaussian.comp -o gaussian.spv
+glslc backward.comp -o backward.spv
+glslc loss.comp -o loss.spv
 
 if %errorlevel% neq 0 (
     echo [ERROR] Shader compilation failed!

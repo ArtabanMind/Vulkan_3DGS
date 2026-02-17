@@ -1,0 +1,48 @@
+#version 450
+// ============================================================
+// File: shaders/loss.comp
+// Role: L2 Loss 계산 (rendered vs target)
+// Phase: 2-1
+// ============================================================
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// ------------------------------------------------------------
+// SSBO 바인딩
+// ------------------------------------------------------------
+layout(std430, binding = 0) buffer RenderedImage {
+    vec4 rendered[];  // compute shader 출력
+};
+
+layout(std430, binding = 1) buffer TargetImage {
+    vec4 target[];    // 목표 이미지 (CPU에서 업로드)
+};
+
+layout(std430, binding = 2) buffer LossBuffer {
+    float pixelLoss[];  // 픽셀별 loss (나중에 CPU에서 합산)
+    // 또는 atomic add로 GPU에서 합산 가능 (Phase 2 후반)
+};
+
+layout(push_constant) uniform PushConstants {
+    uint width;
+    uint height;
+} pc;
+
+void main() {
+    uint px = gl_GlobalInvocationID.x;
+    uint py = gl_GlobalInvocationID.y;
+    if (px >= pc.width || py >= pc.height) return;
+    
+    uint idx = py * pc.width + px;
+    
+    // ---------------------------------------------------------
+    // L2 Loss: 0.5 * (rendered - target)²
+    // ---------------------------------------------------------
+    // 0.5 붙이는 이유: 미분하면 (rendered - target)로 깔끔
+    // RGB 채널별 계산 후 합산
+    // ---------------------------------------------------------
+    vec3 diff = rendered[idx].rgb - target[idx].rgb;
+    float loss = 0.5 * dot(diff, diff);  // 0.5 * (dr² + dg² + db²)
+    
+    pixelLoss[idx] = loss;
+}
