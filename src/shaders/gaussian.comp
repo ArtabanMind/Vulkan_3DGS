@@ -1,0 +1,121 @@
+#version 450
+// ============================================================
+// File: shaders/gaussian.comp
+// Role: 2D 이미지에 가우시안 블롭 렌더링 (exp(-r²))
+// Phase: 1-1 시각적 검증
+// 학습 고려: 이 출력이 forward 결과 → backward에서 target과 비교
+// ============================================================
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+// 8×8 = 64 스레드/workgroup
+// 64×64 이미지 → dispatch(8, 8, 1)로 전체 커버
+
+// ------------------------------------------------------------
+// 가우시안 파라미터 (CPU와 동일 구조)
+// ------------------------------------------------------------
+struct GaussianParam {
+    vec3 position;    // .xy = 2D 중심 (픽셀 좌표), .z = 미사용 (현재)
+    float opacity;
+    vec3 scale;       // .x = 반지름 (픽셀 단위)
+    float _pad0;
+    vec4 rotation;    // 미사용 (2D에선 불필요)
+    vec3 color;       // RGB [0, 1]
+    float _pad1;
+};
+
+// ------------------------------------------------------------
+// SSBO 바인딩
+// ------------------------------------------------------------
+// binding 0: 가우시안 파라미터
+// binding 1: 출력 이미지 (RGBA, 픽셀당 4 floats)
+//
+// 학습 확장 시:
+//   binding 2: target 이미지 (비교용)
+//   binding 3: gradient 버퍼
+// ------------------------------------------------------------
+layout(std430, binding = 0) buffer GaussianBuffer {
+    GaussianParam params[];
+};
+
+layout(std430, binding = 1) buffer ImageBuffer {
+    vec4 pixels[];  // RGBA per pixel
+    // 인덱싱: pixels[y * width + x]
+    // 예시: 64×64 이미지, (10, 20) → pixels[20 * 64 + 10]
+};
+
+// ------------------------------------------------------------
+// Push Constants: 작은 상수 (매 dispatch마다 변경 가능)
+// ------------------------------------------------------------
+// UBO보다 빠름, 128 bytes 이하 권장
+// 학습 시: iteration 번호, learning rate 등 추가 가능
+// ------------------------------------------------------------
+layout(push_constant) uniform PushConstants {
+    uint width;       // 이미지 너비 (64)
+    uint height;      // 이미지 높이 (64)
+    uint gaussCount;  // 가우시안 개수 (현재 1)
+} pc;
+
+void main() {
+    // 현재 픽셀 좌표
+    uint px = gl_GlobalInvocationID.x;  // 0 ~ width-1
+    uint py = gl_GlobalInvocationID.y;  // 0 ~ height-1
+    
+    // 범위 체크 (dispatch가 이미지보다 클 수 있음)
+    if (px >= pc.width || py >= pc.height) return;
+    
+    // 픽셀 인덱스 (1D 배열 접근용)
+    uint pixelIdx = py * pc.width + px;
+    
+    // ---------------------------------------------------------
+    // 알파 블렌딩 누적
+    // ---------------------------------------------------------
+    // 공식: C_final = Σ (C_i * α_i * T_i)
+    //       T_i = Π (1 - α_j) for j < i  (transmittance)
+    //
+    // 학습 시 backward에서 필요:
+    //   - 각 가우시안의 T_i 값 저장
+    //   - last_contributor 인덱스 저장
+    // ---------------------------------------------------------
+    vec3 colorAccum = vec3(0.0);  // 누적 색상
+    float T = 1.0;                 // transmittance (남은 투과량)
+    
+    for (uint i = 0; i < pc.gaussCount; i++) {
+        GaussianParam g = params[i];
+        
+        // 픽셀 중심과 가우시안 중심 사이 거리
+        vec2 center = g.position.xy;
+        vec2 pixelPos = vec2(float(px) + 0.5, float(py) + 0.5);
+        vec2 diff = pixelPos - center;
+        
+        // ---------------------------------------------------------
+        // 가우시안 함수: exp(-0.5 * (r/σ)²)
+        // ---------------------------------------------------------
+        // r = 거리, σ = scale.x (반지름)
+        // scale 클수록 넓게 퍼짐
+        //
+        // 예시: center=(32,32), scale=10, pixel=(32,42)
+        //       diff=(0,10), r²=100, σ²=100
+        //       exp(-0.5 * 100/100) = exp(-0.5) ≈ 0.606
+        // ---------------------------------------------------------
+        float sigma = g.scale.x;
+        float r2 = dot(diff, diff);           // r² = dx² + dy²
+        float sigma2 = sigma * sigma;
+        float gaussian = exp(-0.5 * r2 / sigma2);
+        
+        // 최종 알파 = 가우시안 * opacity
+        float alpha = gaussian * g.opacity;
+        
+        // 알파 블렌딩: front-to-back
+        colorAccum += g.color * alpha * T;
+        T *= (1.0 - alpha);  // 남은 투과량 감소
+        
+        // 최적화: T가 거의 0이면 뒤는 안 보임
+        if (T < 0.001) break;
+    }
+    
+    // 배경색 (검정) + 누적 색상
+    vec3 finalColor = colorAccum + vec3(0.0) * T;
+    
+    // 출력 (RGBA, A=1)
+    pixels[pixelIdx] = vec4(finalColor, 1.0);
+}

@@ -15,6 +15,7 @@
 echo Compiling shaders...
 
 glslc simple.comp -o simple.spv
+glslc gaussian.comp -o gaussian.spv
 
 if %errorlevel% neq 0 (
     echo [ERROR] Shader compilation failed!
@@ -22,5 +23,5 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 
-echo [OK] simple.comp → simple.spv
+echo [OK] All shaders compiled
 pause
