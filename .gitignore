@@ -3,3 +3,8 @@ src/shaders/*.spv
 third_party
 .vscode
 src/*.pdb
+cowork/*
+
+src/crew_review.md
+src/main_commented.cpp
+
