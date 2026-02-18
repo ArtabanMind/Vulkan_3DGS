@@ -41,6 +41,16 @@ struct GaussianGrad {
 };
 static_assert(sizeof(GaussianGrad) == 64, "GaussianGrad must be 64 bytes");
 
+struct GaussianGradInt {
+    glm::ivec3 dPosition;   int dOpacity;
+    glm::ivec3 dScale;      int _pad0;
+    glm::ivec4 dRotation;
+    glm::ivec3 dColor;      int _pad1;
+};
+
+static_assert(sizeof(GaussianGradInt) == 64, "GaussianGradInt must be 64 bytes");
+
+const float GRAD_SCALE = 1000000.0f;
 // ============================================================
 // CPU에서 가우시안 렌더링 (target 생성용)
 // ============================================================
@@ -107,7 +117,8 @@ int main() {
         engine.device(), "../src/shaders/gaussian.spv", 2, sizeof(RenderPC));
     gs::ComputeContext lossPipeline = gs::createComputePipeline(
         engine.device(), "../src/shaders/loss.spv", 3, sizeof(LossPC));
-
+    gs::ComputeContext backwardPipeline = gs::createComputePipeline(
+        engine.device(), "../src/shaders/backward.spv", 4, sizeof(RenderPC));
     // ============================================================
     // Target 가우시안 (학습 목표)
     // ============================================================
@@ -180,6 +191,10 @@ int main() {
     gs::bindSSBO(engine.device(), lossPipeline, targetBuf.buffer, targetBuf.size, 1);
     gs::bindSSBO(engine.device(), lossPipeline, lossBuf.buffer, lossBuf.size, 2);
 
+    gs::bindSSBO(engine.device(), backwardPipeline, paramsBuf.buffer, paramsBuf.size, 0); 
+    gs::bindSSBO(engine.device(), backwardPipeline, gradsBuf.buffer, gradsBuf.size, 1);
+    gs::bindSSBO(engine.device(), backwardPipeline, renderedBuf.buffer, renderedBuf.size,2);
+    gs::bindSSBO(engine.device(), backwardPipeline, targetBuf.buffer, targetBuf.size, 3);
     // ============================================================
     // 학습 루프
     // ============================================================
@@ -193,7 +208,9 @@ int main() {
     for (int iter = 0; iter < MAX_ITER; iter++) {
         // ---------- 파라미터 업로드 ----------
         gs::uploadToBuffer(engine.device(), paramsBuf, gaussians.data(), paramsSize);
-        
+        std::vector<GaussianGradInt> zeroGrads(GAUSS_COUNT, GaussianGradInt{});
+        gs::uploadToBuffer(engine.device(), gradsBuf, zeroGrads.data(), gradsSize);
+
         // ---------- Command Buffer ----------
         VkCommandBufferBeginInfo beginInfo{};
         beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
@@ -226,8 +243,17 @@ int main() {
             VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(lossPC), &lossPC);
         vkCmdDispatch(cmd, IMG_W / 8, IMG_H / 8, 1);
         
-        vkEndCommandBuffer(cmd);
+        // Backward
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, backwardPipeline.pipeline);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+            backwardPipeline.pipelineLayout, 0, 1, &backwardPipeline.descriptorSet, 0, nullptr);
+        vkCmdPushConstants(cmd, backwardPipeline.pipelineLayout,
+            VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(renderPC), &renderPC);
+        vkCmdDispatch(cmd, IMG_W / 8, IMG_H / 8, 1);
         
+        vkEndCommandBuffer(cmd);
+
+        // Processing ++++++++++++++++++++++++++++++++++++++++++++++++++++++
         // Submit
         VkSubmitInfo submitInfo{};
         submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -235,6 +261,7 @@ int main() {
         submitInfo.pCommandBuffers = &cmd;
         vkQueueSubmit(engine.computeQueue(), 1, &submitInfo, VK_NULL_HANDLE);
         vkQueueWaitIdle(engine.computeQueue());
+        // Processing ------------------------------------------------------
         
         // ---------- Loss 합산 ----------
         std::vector<float> pixelLoss(pixelCount);
@@ -245,56 +272,24 @@ int main() {
         // ---------- Gradient 계산 (CPU) ----------
         std::vector<glm::vec4> rendered(pixelCount);
         gs::downloadFromBuffer(engine.device(), renderedBuf, rendered.data(), imageSize);
-        
+
+        std::vector<GaussianGradInt> gradsInt(GAUSS_COUNT); 
+        gs::downloadFromBuffer(engine.device(), gradsBuf, gradsInt.data(), gradsSize);
+
         // gradient 초기화
         std::vector<glm::vec3> dColors(GAUSS_COUNT, glm::vec3(0.0f));
         std::vector<glm::vec2> dPositions(GAUSS_COUNT, glm::vec2(0.0f));
         
-        for (uint32_t y = 0; y < IMG_H; y++) {
-            for (uint32_t x = 0; x < IMG_W; x++) {
-                uint32_t idx = y * IMG_W + x;
-                glm::vec2 pixelPos(x + 0.5f, y + 0.5f);
-                
-                // dL/dRendered
-                glm::vec3 dL_dR = glm::vec3(rendered[idx]) - glm::vec3(targetPixels[idx]);
-                
-                // 알파 블렌딩 재계산 + gradient
-                float T = 1.0f;
-                for (uint32_t i = 0; i < GAUSS_COUNT; i++) {
-                    const auto& g = gaussians[i];
-                    
-                    glm::vec2 center(g.position.x, g.position.y);
-                    glm::vec2 diff = pixelPos - center;
-                    float r2 = glm::dot(diff, diff);
-                    float sigma2 = g.scale.x * g.scale.x;
-                    float gaussian = std::exp(-0.5f * r2 / sigma2);
-                    float alpha = gaussian * g.opacity;
-                    
-                    // dL/dColor_i = dL/dR * alpha * T
-                    dColors[i] += dL_dR * alpha * T;
-                    
-                    // dL/dPosition_i
-                    glm::vec2 dGauss_dCenter = gaussian * diff / sigma2;
-                    float dL_dGaussian = glm::dot(dL_dR, g.color) * g.opacity * T;
-                    dPositions[i].x += dL_dGaussian * dGauss_dCenter.x;
-                    dPositions[i].y += dL_dGaussian * dGauss_dCenter.y;
-                    
-                    // transmittance 업데이트
-                    T *= (1.0f - alpha);
-                    if (T < 0.001f) break;
-                }
-            }
-        }
-        
-        // ---------- 파라미터 업데이트 ----------
         for (uint32_t i = 0; i < GAUSS_COUNT; i++) {
-            gaussians[i].color -= colorLR * dColors[i] / float(pixelCount);
-            gaussians[i].color = glm::clamp(gaussians[i].color, glm::vec3(0.0f), glm::vec3(1.0f));
+            glm::vec3 dColor = glm::vec3(gradsInt[i].dColor) / GRAD_SCALE / float(pixelCount);
+            glm::vec2 dPos = glm::vec2(gradsInt[i].dPosition) / GRAD_SCALE / float(pixelCount);
             
-            gaussians[i].position.x -= posLR * dPositions[i].x / float(pixelCount);
-            gaussians[i].position.y -= posLR * dPositions[i].y / float(pixelCount);
+            gaussians[i].color -= colorLR * dColor;
+            gaussians[i].color = glm::clamp(gaussians[i].color, glm::vec3(0.0f), glm::vec3(1.0f));
+            gaussians[i].position.x -= posLR * dPos.x;
+            gaussians[i].position.y -= posLR * dPos.y;
         }
-        
+
         // ---------- 로그 ----------
         if (iter % 20 == 0 || iter == MAX_ITER - 1) {
             printf("Iter %3d | Loss: %.2f\n", iter, totalLoss);
@@ -314,7 +309,7 @@ int main() {
     printf("\n=== Save Results ===\n");
     std::vector<glm::vec4> finalImage(pixelCount);
     gs::downloadFromBuffer(engine.device(), renderedBuf, finalImage.data(), imageSize);
-    gs::savePPM("final.ppm", finalImage, IMG_W, IMG_H);
+    gs::savePPM("../ppmOutput/final.ppm", finalImage, IMG_W, IMG_H);
 
     // ============================================================
     // Cleanup
@@ -324,8 +319,10 @@ int main() {
     gs::destroyBuffer(engine.device(), renderedBuf);
     gs::destroyBuffer(engine.device(), targetBuf);
     gs::destroyBuffer(engine.device(), lossBuf);
+
     gs::destroyComputePipeline(engine.device(), renderPipeline);
     gs::destroyComputePipeline(engine.device(), lossPipeline);
+    gs::destroyComputePipeline(engine.device(), backwardPipeline);
     engine.cleanup();
     
     glfwDestroyWindow(window);

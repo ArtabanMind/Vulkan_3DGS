@@ -168,7 +168,8 @@ inline void bindSSBO(VkDevice device, ComputeContext& ctx, VkBuffer buffer, VkDe
     write.descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     write.descriptorCount = 1;
     write.pBufferInfo     = &bufferInfo;
-    
+
+    // connect to shader 
     vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
 }
 

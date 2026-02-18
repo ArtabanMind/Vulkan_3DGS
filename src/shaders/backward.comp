@@ -1,59 +1,34 @@
 #version 450
-// ============================================================
-// File: shaders/backward.comp
-// Role: dL/dColor 계산 (Phase 2-2)
-// Phase: 2-2 ~ 2-4 확장 예정
-// ============================================================
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
-// ------------------------------------------------------------
-// 구조체
-// ------------------------------------------------------------
 struct GaussianParam {
-    vec3 position;
-    float opacity;
-    vec3 scale;
-    float _pad0;
+    vec3 position;  float opacity;
+    vec3 scale;     float _pad0;
     vec4 rotation;
-    vec3 color;
-    float _pad1;
+    vec3 color;     float _pad1;
 };
 
-struct GaussianGrad {
-    vec3 dPosition;   // dL/dPosition
-    float dOpacity;   // dL/dOpacity
-    vec3 dScale;      // dL/dScale (나중에)
-    float _pad0;
-    vec4 dRotation;   // dL/dRotation (나중에)
-    vec3 dColor;      // dL/dColor
-    float _pad1;
+// int 버전 (atomic용) - float * 1000000 스케일
+struct GaussianGradInt {
+    ivec3 dPosition;  int dOpacity;
+    ivec3 dScale;     int _pad0;
+    ivec4 dRotation;
+    ivec3 dColor;     int _pad1;
 };
 
-// ------------------------------------------------------------
-// SSBO
-// ------------------------------------------------------------
-layout(std430, binding = 0) buffer GaussianBuffer {
-    GaussianParam params[];
-};
+layout(std430, binding = 0) buffer Params   { GaussianParam params[]; };
+layout(std430, binding = 1) buffer Grads    { GaussianGradInt grads[]; };
+layout(std430, binding = 2) buffer Rendered { vec4 rendered[]; };
+layout(std430, binding = 3) buffer Target   { vec4 target[]; };
 
-layout(std430, binding = 1) buffer GradBuffer {
-    GaussianGrad grads[];  // gradient 누적
-};
-
-layout(std430, binding = 2) buffer RenderedImage {
-    vec4 rendered[];
-};
-
-layout(std430, binding = 3) buffer TargetImage {
-    vec4 target[];
-};
-
-layout(push_constant) uniform PushConstants {
+layout(push_constant) uniform PC {
     uint width;
     uint height;
     uint gaussCount;
 } pc;
+
+const float SCALE = 1000000.0;  // float→int 변환 스케일
 
 void main() {
     uint px = gl_GlobalInvocationID.x;
@@ -61,45 +36,33 @@ void main() {
     if (px >= pc.width || py >= pc.height) return;
     
     uint idx = py * pc.width + px;
-    
-    // ---------------------------------------------------------
-    // dL/dRendered = (rendered - target)
-    // ---------------------------------------------------------
-    // L = 0.5 * (R - T)² 이므로
-    // dL/dR = (R - T)
-    // ---------------------------------------------------------
-    vec3 dL_dRendered = rendered[idx].rgb - target[idx].rgb;
-    
     vec2 pixelPos = vec2(float(px) + 0.5, float(py) + 0.5);
+    vec3 dL_dR = rendered[idx].rgb - target[idx].rgb;
     
-    // ---------------------------------------------------------
-    // 각 가우시안에 대해 gradient 역전파
-    // ---------------------------------------------------------
-    // 단일 가우시안, 단순 모델:
-    //   rendered = color * alpha * gaussian_weight
-    //   dL/dColor = dL/dRendered * alpha * gaussian_weight
-    // ---------------------------------------------------------
+    float T = 1.0;
     for (uint i = 0; i < pc.gaussCount; i++) {
         GaussianParam g = params[i];
         
         vec2 center = g.position.xy;
         vec2 diff = pixelPos - center;
-        float sigma = g.scale.x;
         float r2 = dot(diff, diff);
-        float sigma2 = sigma * sigma;
+        float sigma2 = g.scale.x * g.scale.x;
         float gaussian = exp(-0.5 * r2 / sigma2);
         float alpha = gaussian * g.opacity;
         
-        // dL/dColor (atomic add 필요 - 여러 픽셀이 같은 가우시안에 기여)
-        vec3 dColor = dL_dRendered * alpha;
+        // dL/dColor
+        vec3 dColor = dL_dR * alpha * T;
+        atomicAdd(grads[i].dColor.r, int(dColor.r * SCALE));
+        atomicAdd(grads[i].dColor.g, int(dColor.g * SCALE));
+        atomicAdd(grads[i].dColor.b, int(dColor.b * SCALE));
         
-        // ---------------------------------------------------------
-        // Atomic add: GLSL에서 float atomic 없음 → 정수 변환 트릭
-        // 간단 버전: CPU에서 합산 (느리지만 검증용으로 충분)
-        // ---------------------------------------------------------
-        // 여기선 간단히 마지막 픽셀 값만 저장 (검증용)
-        // 실제론 atomicAdd 또는 per-pixel gradient 저장 후 reduce
-        // ---------------------------------------------------------
-        grads[i].dColor += dColor;  // 주의: race condition (검증용 OK)
+        // dL/dPosition
+        vec2 dGauss_dCenter = gaussian * diff / sigma2;
+        float dL_dGauss = dot(dL_dR, g.color) * g.opacity * T;
+        atomicAdd(grads[i].dPosition.x, int(dL_dGauss * dGauss_dCenter.x * SCALE));
+        atomicAdd(grads[i].dPosition.y, int(dL_dGauss * dGauss_dCenter.y * SCALE));
+        
+        T *= (1.0 - alpha);
+        if (T < 0.001) break;
     }
 }
