@@ -97,10 +97,10 @@ void main() {
         //       diff=(0,10), r²=100, σ²=100
         //       exp(-0.5 * 100/100) = exp(-0.5) ≈ 0.606
         // ---------------------------------------------------------
-        float sigma = g.scale.x;
-        float r2 = dot(diff, diff);           // r² = dx² + dy²
-        float sigma2 = sigma * sigma;
-        float gaussian = exp(-0.5 * r2 / sigma2);
+        float sx = g.scale.x;
+        float sy = g.scale.y;
+        float r2 = (diff.x * diff.x) / (sx*sx) + (diff.y * diff.y) / (sy*sy);
+        float gaussian = exp(-0.5 * r2);
         
         // 최종 알파 = 가우시안 * opacity
         float alpha = gaussian * g.opacity;

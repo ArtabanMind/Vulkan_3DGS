@@ -69,9 +69,14 @@ void renderGaussiansCPU(
             for (const auto& g : gaussians) {
                 glm::vec2 center(g.position.x, g.position.y);
                 glm::vec2 diff = pixelPos - center;
-                float r2 = glm::dot(diff, diff);
-                float sigma2 = g.scale.x * g.scale.x;
-                float gaussian = std::exp(-0.5f * r2 / sigma2);
+                float sx = g.scale.x;       // new
+                float sy = g.scale.y;       // new
+
+                // float r2 = glm::dot(diff, diff); // old
+                float r2 = (diff.x * diff.x) / (sx * sx) + (diff.y * diff.y) / (sy * sy);
+                // float sigma2 = g.scale.x * g.scale.x;
+                //float gaussian = std::exp(-0.5f * r2 / sigma2);   // old
+                float gaussian = exp(-0.5 * r2);    // new
                 float alpha = gaussian * g.opacity;
                 
                 colorAccum += g.color * alpha * T;
@@ -85,12 +90,14 @@ void renderGaussiansCPU(
     }
 }
 
+
+
 int main() {
     // ============================================================
     // 설정
     // ============================================================
-    const uint32_t IMG_W = 64;
-    const uint32_t IMG_H = 64;
+    const uint32_t IMG_W = 128;
+    const uint32_t IMG_H = 128;
     const uint32_t pixelCount = IMG_W * IMG_H;
     const uint32_t GAUSS_COUNT = 3;  // N개 가우시안
     
@@ -124,32 +131,45 @@ int main() {
     // ============================================================
     printf("\n=== Create Target ===\n");
     std::vector<gs::GaussianParam> targetGaussians = {
-        gs::makeDefaultGaussian(glm::vec3(20.0f, 20.0f, 0.0f), glm::vec3(1.0f, 0.0f, 0.0f)),  // 빨강
-        gs::makeDefaultGaussian(glm::vec3(44.0f, 20.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f)),  // 초록
-        gs::makeDefaultGaussian(glm::vec3(32.0f, 44.0f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f)),  // 파랑
+        gs::makeDefaultGaussian(glm::vec3(20.0f, 20.0f, 0.0f), glm::vec3(1.0f, 0.0f, 0.0f), 1.0f, glm::vec3(5.1f)),  // 빨강
+        gs::makeDefaultGaussian(glm::vec3(44.0f, 20.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f), 1.0f, glm::vec3(5.1f)),  // 초록
+        gs::makeDefaultGaussian(glm::vec3(32.0f, 44.0f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f), 1.0f, glm::vec3(5.1f)),  // 파랑
     };
+    /*
     for (auto& g : targetGaussians) {
         g.scale = glm::vec3(8.0f);
         g.opacity = 1.0f;
     }
+    */
     
     std::vector<glm::vec4> targetPixels(pixelCount);
     renderGaussiansCPU(targetPixels, targetGaussians, IMG_W, IMG_H);
+    gs::savePPM("../ppmOutput/target.ppm", targetPixels, IMG_W, IMG_H);
 
+    std::vector<glm::vec4> currentPixels(pixelCount);
+    gs::savePPM("../ppmOutput/current.ppm", currentPixels, IMG_W, IMG_H);
 
     // ============================================================
     // 학습할 가우시안 (초기값: 위치/색상 랜덤하게 틀림)
     // ============================================================
+    // opacity = 0.5f; scale = 0.5f, 0.9f, 0.2f
     std::vector<gs::GaussianParam> gaussians = {
-        gs::makeDefaultGaussian(glm::vec3(25.0f, 25.0f, 0.0f), glm::vec3(0.5f, 0.5f, 0.0f)),  // 노랑?
-        gs::makeDefaultGaussian(glm::vec3(40.0f, 25.0f, 0.0f), glm::vec3(0.0f, 0.5f, 0.5f)),  // 청록?
-        gs::makeDefaultGaussian(glm::vec3(30.0f, 40.0f, 0.0f), glm::vec3(0.5f, 0.0f, 0.5f)),  // 자주?
+        gs::makeDefaultGaussian(glm::vec3(25.0f, 25.0f, 0.0f), glm::vec3(0.5f, 0.5f, 0.0f), 1.0f, glm::vec3(5.0f)),  // 노랑?
+        gs::makeDefaultGaussian(glm::vec3(40.0f, 25.0f, 0.0f), glm::vec3(0.0f, 0.5f, 0.5f), 1.0f, glm::vec3(5.0f)),  // 청록?
+        gs::makeDefaultGaussian(glm::vec3(30.0f, 40.0f, 0.0f), glm::vec3(0.5f, 0.0f, 0.5f), 1.0f, glm::vec3(5.0f)),  // 자주?
     };
+    /*
     for (auto& g : gaussians) {
         g.scale = glm::vec3(8.0f);
         g.opacity = 1.0f;
     }
-
+    */
+    printf("Target G0: color(%.2f,%.2f,%.2f) opacity(%.2f)\n",
+       targetGaussians[0].color.r, targetGaussians[0].color.g, 
+       targetGaussians[0].color.b, targetGaussians[0].opacity);
+    printf("Learn  G0: color(%.2f,%.2f,%.2f) opacity(%.2f)\n",
+       gaussians[0].color.r, gaussians[0].color.g, 
+       gaussians[0].color.b, gaussians[0].opacity);
     // ============================================================
     // 버퍼 생성
     // ============================================================
@@ -176,6 +196,7 @@ int main() {
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
     gs::uploadToBuffer(engine.device(), targetBuf, targetPixels.data(), imageSize);
     
+    
     gs::BufferBundle lossBuf = gs::createBuffer(
         engine.device(), engine.physicalDevice(),
         lossSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
@@ -199,12 +220,17 @@ int main() {
     // 학습 루프
     // ============================================================
     printf("\n=== Training Loop (N=%u) ===\n", GAUSS_COUNT);
-    const int MAX_ITER = 200;
+    const int MAX_ITER = 1500;
     const float colorLR = 0.3f;
     const float posLR = 30.0f;
+    const float opacityLR = 0.3f;
+    const float scaleLR = 10.0f; // canbe 10.0f ~ 30.0f;
     
     VkCommandBuffer cmd = engine.commandBuffer();
-    
+
+
+
+
     for (int iter = 0; iter < MAX_ITER; iter++) {
         // ---------- 파라미터 업로드 ----------
         gs::uploadToBuffer(engine.device(), paramsBuf, gaussians.data(), paramsSize);
@@ -269,36 +295,50 @@ int main() {
         float totalLoss = 0.0f;
         for (float l : pixelLoss) totalLoss += l;
         
-        // ---------- Gradient 계산 (CPU) ----------
         std::vector<glm::vec4> rendered(pixelCount);
         gs::downloadFromBuffer(engine.device(), renderedBuf, rendered.data(), imageSize);
 
         std::vector<GaussianGradInt> gradsInt(GAUSS_COUNT); 
         gs::downloadFromBuffer(engine.device(), gradsBuf, gradsInt.data(), gradsSize);
 
-        // gradient 초기화
-        std::vector<glm::vec3> dColors(GAUSS_COUNT, glm::vec3(0.0f));
-        std::vector<glm::vec2> dPositions(GAUSS_COUNT, glm::vec2(0.0f));
-        
+
+        // gaussian parameter update 
         for (uint32_t i = 0; i < GAUSS_COUNT; i++) {
             glm::vec3 dColor = glm::vec3(gradsInt[i].dColor) / GRAD_SCALE / float(pixelCount);
             glm::vec2 dPos = glm::vec2(gradsInt[i].dPosition) / GRAD_SCALE / float(pixelCount);
-            
+            float dOpacity = float(gradsInt[i].dOpacity) / GRAD_SCALE/ float(pixelCount);
+            glm::vec3 dScale = glm::vec3(gradsInt[i].dScale) / GRAD_SCALE/ float(pixelCount);
+
             gaussians[i].color -= colorLR * dColor;
             gaussians[i].color = glm::clamp(gaussians[i].color, glm::vec3(0.0f), glm::vec3(1.0f));
             gaussians[i].position.x -= posLR * dPos.x;
             gaussians[i].position.y -= posLR * dPos.y;
+            gaussians[i].opacity -= opacityLR * dOpacity;
+            gaussians[i].opacity = glm::clamp(gaussians[i].opacity, 0.01f, 1.0f);
+            gaussians[i].scale.x -= scaleLR * dScale.x;
+            gaussians[i].scale.y -= scaleLR * dScale.y;
+            gaussians[i].scale = glm::max(gaussians[i].scale, glm::vec3(0.1f));
+            
+            
+            printf("G0 dScale: (%f, %f)\n", dScale.x, dScale.y);
+            printf("G0 dColor: (%f, %f, %f)\n", dColor.x, dColor.y, dColor.z);
+            printf("G0 dPos: (%f, %f)\n", dPos.x, dPos.y);
+            printf("G0 dOpacity: (%f)\n", dOpacity);
+            
         }
 
         // ---------- 로그 ----------
+        /*
         if (iter % 20 == 0 || iter == MAX_ITER - 1) {
             printf("Iter %3d | Loss: %.2f\n", iter, totalLoss);
             for (uint32_t i = 0; i < GAUSS_COUNT; i++) {
-                printf("  G%u: Color(%.2f,%.2f,%.2f) Pos(%.1f,%.1f)\n", i,
+                printf("  G%u: Color(%.2f,%.2f,%.2f) Pos(%.1f,%.1f) opacity(%.2f) scale(%.2f, %.2f, %.2f)\n", i,
                     gaussians[i].color.r, gaussians[i].color.g, gaussians[i].color.b,
-                    gaussians[i].position.x, gaussians[i].position.y);
+                    gaussians[i].position.x, gaussians[i].position.y,
+                    gaussians[i].opacity, gaussians[i].scale.x, gaussians[i].scale.y, gaussians[i].scale.z);
             }
         }
+        */
         
         vkResetCommandBuffer(cmd, 0);
     }

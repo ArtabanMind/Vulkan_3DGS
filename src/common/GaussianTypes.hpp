@@ -55,11 +55,11 @@ static_assert(sizeof(GaussianParam) == 64,
 // ------------------------------------------------------------
 // 헬퍼: 기본값으로 초기화된 가우시안 생성
 // ------------------------------------------------------------
-inline GaussianParam makeDefaultGaussian(glm::vec3 pos, glm::vec3 col) {
+inline GaussianParam makeDefaultGaussian(glm::vec3 pos, glm::vec3 col, float opacity, glm::vec3 scale) {
     return GaussianParam{
         .position = pos,
-        .opacity  = 1.0f,
-        .scale    = glm::vec3(0.1f),        // 작은 구형
+        .opacity  = opacity,
+        .scale    = scale,
         ._pad0    = 0.0f,
         .rotation = glm::vec4(1, 0, 0, 0),  // identity quaternion
         .color    = col,

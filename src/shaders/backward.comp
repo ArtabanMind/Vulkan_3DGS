@@ -38,16 +38,19 @@ void main() {
     uint idx = py * pc.width + px;
     vec2 pixelPos = vec2(float(px) + 0.5, float(py) + 0.5);
     vec3 dL_dR = rendered[idx].rgb - target[idx].rgb;
-    
+    vec3 bg = vec3(0.0);
+
     float T = 1.0;
     for (uint i = 0; i < pc.gaussCount; i++) {
         GaussianParam g = params[i];
         
         vec2 center = g.position.xy;
         vec2 diff = pixelPos - center;
-        float r2 = dot(diff, diff);
-        float sigma2 = g.scale.x * g.scale.x;
-        float gaussian = exp(-0.5 * r2 / sigma2);
+        float sx = g.scale.x;
+        float sy = g.scale.y;
+        
+        float r2 = (diff.x * diff.x) / (sx * sx) + (diff.y * diff.y) / (sy * sy);
+        float gaussian = exp(-0.5 * r2);
         float alpha = gaussian * g.opacity;
         
         // dL/dColor
@@ -57,11 +60,27 @@ void main() {
         atomicAdd(grads[i].dColor.b, int(dColor.b * SCALE));
         
         // dL/dPosition
-        vec2 dGauss_dCenter = gaussian * diff / sigma2;
+        vec2 dGauss_dCenter = gaussian * vec2(diff.x / (sx * sx), diff.y / (sy * sy));
         float dL_dGauss = dot(dL_dR, g.color) * g.opacity * T;
         atomicAdd(grads[i].dPosition.x, int(dL_dGauss * dGauss_dCenter.x * SCALE));
         atomicAdd(grads[i].dPosition.y, int(dL_dGauss * dGauss_dCenter.y * SCALE));
+
+        // bg = vec3(0.0), G == gaussian
+        float dL_dOpacity = dot(dL_dR, (g.color - bg)) * gaussian * T;
+        atomicAdd(grads[i].dOpacity, int(dL_dOpacity * SCALE));
+
+        float dL_dG = dot(dL_dR, (g.color - bg)) * g.opacity * T;
+        // px, py == pixelPos.x, pixelPos.y, center == g.position.xy
+        float dx = pixelPos.x - center.x;
+        float dy = pixelPos.y - center.y;
         
+
+        float dL_dsx = dL_dG * gaussian * dx * dx / (sx * sx * sx);
+        float dL_dsy = dL_dG * gaussian * dy * dy / (sy * sy * sy);
+
+        atomicAdd(grads[i].dScale.x, int(dL_dsx * SCALE));
+        atomicAdd(grads[i].dScale.y, int(dL_dsy * SCALE));
+
         T *= (1.0 - alpha);
         if (T < 0.001) break;
     }
